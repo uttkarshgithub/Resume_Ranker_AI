@@ -1,0 +1,7 @@
+streamlit
+groq
+PyPDF2
+pandas
+xlsxwriter
+matplotlib
+numpy
