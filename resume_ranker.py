@@ -23,13 +23,21 @@ except ImportError:
 
 st.set_page_config(
     page_title="AI Resume Matcher - Groq",
-    layout="wide"
+    layout="wide",
 )
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-DEFAULT_MODEL = "llama-3.1-8b-instant"
 MAX_RESUMES = 5
+
+# Preferred models. The application will only offer models
+# that are actually visible to the current Groq API key.
+PREFERRED_MODELS = [
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+]
 
 client = None
 
@@ -47,10 +55,56 @@ if "results" not in st.session_state:
 if "reset_id" not in st.session_state:
     st.session_state["reset_id"] = 0
 
+if "selected_model" not in st.session_state:
+    st.session_state["selected_model"] = ""
+
 
 def clear_all():
     st.session_state.clear()
     st.rerun()
+
+
+# ============================================================
+# MODEL DISCOVERY
+# ============================================================
+
+def get_available_models():
+    """
+    Return models currently visible to the Groq API key.
+    """
+    if client is None:
+        return []
+
+    try:
+        response = client.models.list()
+
+        model_ids = []
+
+        for model in response.data:
+            model_id = getattr(model, "id", None)
+
+            if model_id:
+                model_ids.append(model_id)
+
+        return sorted(set(model_ids))
+
+    except Exception:
+        return []
+
+
+def choose_default_model(available_models):
+    """
+    Prefer known good models when available.
+    Otherwise use the first visible model.
+    """
+    for preferred in PREFERRED_MODELS:
+        if preferred in available_models:
+            return preferred
+
+    if available_models:
+        return available_models[0]
+
+    return ""
 
 
 # ============================================================
@@ -63,50 +117,112 @@ st.write(
     """
 Screen up to 5 resumes against a Job Description using Groq-hosted AI.
 
-Features include AI scoring, skill matching, missing-skill detection,
-weighted scoring, ATS-style parsing, ranking, dashboard analytics,
-candidate similarity analysis, and CSV/Excel export.
+Features:
+- AI score from 1 to 10
+- Bad / Good / Best classification
+- Matching and missing skills
+- Strong points
+- Automatic JD keyword extraction
+- ATS-style name/email/phone parsing
+- Per-skill weighting
+- Candidate ranking
+- Dashboard
+- Candidate similarity heatmap
+- CSV export
+- Excel export
+- Email-ready report
 """
 )
 
 if client:
     st.success("Groq API key detected.")
 else:
-    st.warning(
-        "GROQ_API_KEY is not configured. Add it as an environment variable."
+    st.error(
+        "GROQ_API_KEY is not configured. "
+        "Set it before running AI analysis."
     )
 
 st.markdown("---")
 
 
 # ============================================================
-# CONTROLS
+# CONTROLS / MODEL
 # ============================================================
 
 st.subheader("Controls")
 
-col1, col2 = st.columns(2)
+control_col1, control_col2 = st.columns([1, 2])
 
-with col1:
+with control_col1:
     st.button(
         "Clear All Resumes and Inputs",
         on_click=clear_all,
-        use_container_width=True
+        use_container_width=True,
     )
 
-with col2:
-    model_name = st.text_input(
-        "Groq Model",
-        value=DEFAULT_MODEL,
-        key=f"model_{st.session_state['reset_id']}",
-        help="Recommended free-tier model: llama-3.1-8b-instant"
+with control_col2:
+
+    available_models = get_available_models()
+
+    if available_models:
+
+        default_model = choose_default_model(
+            available_models
+        )
+
+        if (
+            st.session_state["selected_model"]
+            not in available_models
+        ):
+            st.session_state["selected_model"] = default_model
+
+        model_name = st.selectbox(
+            "Select Groq Model",
+            options=available_models,
+            index=available_models.index(
+                st.session_state["selected_model"]
+            ),
+            key="model_selector",
+            help=(
+                "Only models visible to your Groq API key "
+                "are shown here."
+            ),
+        )
+
+        st.session_state["selected_model"] = model_name
+
+        st.success(
+            f"Your API key can access "
+            f"{len(available_models)} model(s)."
+        )
+
+    else:
+
+        st.warning(
+            "Could not retrieve the Groq model list."
+        )
+
+        model_name = st.text_input(
+            "Groq Model",
+            value=(
+                st.session_state["selected_model"]
+                or "openai/gpt-oss-20b"
+            ),
+            key="manual_model",
+        )
+
+        st.session_state["selected_model"] = model_name
+
+if model_name:
+    st.info(
+        f"AI model selected: `{model_name}`"
     )
 
 st.markdown("---")
 
 
 # ============================================================
-# HELPERS
+# HELPER FUNCTIONS
 # ============================================================
 
 STOPWORDS = set(
@@ -152,7 +268,10 @@ def extract_jd_skills(text, top_n=20):
         reverse=True
     )
 
-    return [x[0] for x in ranked[:top_n]]
+    return [
+        item[0]
+        for item in ranked[:top_n]
+    ]
 
 
 def parse_skill_weights(raw_text):
@@ -178,7 +297,9 @@ def parse_skill_weights(raw_text):
         skill = skill.strip().lower()
 
         try:
-            numeric_weight = float(weight.strip())
+            numeric_weight = float(
+                weight.strip()
+            )
         except ValueError:
             numeric_weight = 1.0
 
@@ -210,11 +331,16 @@ def skill_matches(skill, matching_skills):
     return False
 
 
-def compute_weighted_score(matching_skills, skill_weights):
+def compute_weighted_score(
+    matching_skills,
+    skill_weights
+):
     if not skill_weights:
         return None
 
-    total_weight = sum(skill_weights.values())
+    total_weight = sum(
+        skill_weights.values()
+    )
 
     if total_weight <= 0:
         return None
@@ -275,7 +401,10 @@ def ats_parse_resume_text(text):
 
 def safe_list(value):
     if isinstance(value, list):
-        return [str(x) for x in value]
+        return [
+            str(item)
+            for item in value
+        ]
 
     if value is None:
         return []
@@ -291,6 +420,7 @@ def clean_json_response(content):
 
     content = content.strip()
 
+    # Remove JSON markdown fences if present.
     content = re.sub(
         r"^```json\s*",
         "",
@@ -312,36 +442,43 @@ def clean_json_response(content):
 
     content = content.strip()
 
+    # First attempt: direct JSON.
     try:
         return json.loads(content)
 
     except json.JSONDecodeError:
+        pass
 
-        start = content.find("{")
-        end = content.rfind("}")
+    # Second attempt: extract the first object.
+    start = content.find("{")
+    end = content.rfind("}")
 
-        if start == -1 or end == -1:
-            raise ValueError(
-                "Groq did not return valid JSON.\n\n"
-                + content
-            )
+    if start == -1 or end == -1:
+        raise ValueError(
+            "Groq did not return valid JSON.\n\n"
+            + content
+        )
 
-        extracted = content[
-            start:end + 1
-        ]
+    extracted = content[
+        start:end + 1
+    ]
 
-        try:
-            return json.loads(
-                extracted
-            )
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                "Groq returned malformed JSON.\n\n"
-                + content
-            ) from exc
+    try:
+        return json.loads(
+            extracted
+        )
+
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "Groq returned malformed JSON.\n\n"
+            + content
+        ) from exc
 
 
-def normalize_result(data, candidate):
+def normalize_result(
+    data,
+    candidate
+):
     result = {}
 
     result["candidate_name"] = str(
@@ -439,18 +576,27 @@ def normalize_result(data, candidate):
         ""
     )
 
+    result["source"] = candidate.get(
+        "source",
+        ""
+    )
+
     return result
 
 
 def groq_evaluate_candidate(
     job_description,
     candidate_name,
-    resume_text
+    resume_text,
 ):
-
     if not client:
         raise RuntimeError(
             "GROQ_API_KEY is not configured."
+        )
+
+    if not model_name:
+        raise RuntimeError(
+            "No Groq model is selected."
         )
 
     system_prompt = """
@@ -487,11 +633,11 @@ Rules:
 - missing_skills must contain important JD requirements absent or weak in the resume.
 - strong_points must contain relevant achievements, experience, certifications,
   education, domain expertise, leadership, or other professional strengths.
-- Never invent skills or experience.
-- Score based only on job-relevant evidence.
+- Never invent experience or skills.
+- Base the evaluation on job-relevant professional evidence only.
 - Do not use age, gender, race, religion, marital status, health information,
-  nationality, or other protected characteristics in the assessment.
-- Do not add any extra JSON fields.
+  nationality, or other protected characteristics.
+- Do not add extra JSON fields.
 - Do not return markdown.
 """
 
@@ -529,16 +675,28 @@ Rules:
 
     except Exception as exc:
 
-        error_text = str(exc)
+        error_text = str(exc).lower()
 
         if (
             "429" in error_text
-            or "rate limit" in error_text.lower()
-            or "rate_limit" in error_text.lower()
+            or "rate limit" in error_text
+            or "rate_limit" in error_text
         ):
+
             raise RuntimeError(
                 "Groq rate limit reached. "
-                "Please wait a moment and try again."
+                "Please wait and try again."
+            ) from exc
+
+        if (
+            "404" in error_text
+            or "model_not_found" in error_text
+        ):
+
+            raise RuntimeError(
+                f"The selected model "
+                f"'{model_name}' is not accessible "
+                f"to this Groq API key."
             ) from exc
 
         raise
@@ -565,10 +723,13 @@ job_description = st.text_area(
     "Paste the full Job Description:",
     height=220,
     placeholder=(
-        "Include required skills, experience, tools, certifications "
-        "and domain requirements."
+        "Include required skills, experience, tools, "
+        "certifications and domain requirements."
     ),
-    key=f"jd_{st.session_state['reset_id']}"
+    key=(
+        f"jd_"
+        f"{st.session_state['reset_id']}"
+    )
 )
 
 jd_skills = []
@@ -584,12 +745,13 @@ if job_description.strip():
     ):
 
         if jd_skills:
+
             st.write(
-                ", ".join(
-                    jd_skills
-                )
+                ", ".join(jd_skills)
             )
+
         else:
+
             st.write(
                 "No meaningful keywords detected."
             )
@@ -598,10 +760,12 @@ st.markdown("---")
 
 
 # ============================================================
-# RESUME INPUT
+# RESUMES
 # ============================================================
 
-st.subheader("2. Candidate Resumes")
+st.subheader(
+    "2. Candidate Resumes"
+)
 
 st.write(
     "Maximum 5 resumes per screening run."
@@ -618,7 +782,7 @@ candidates = []
 
 
 # ============================================================
-# PASTE
+# PASTE RESUMES
 # ============================================================
 
 with tab1:
@@ -629,7 +793,10 @@ with tab1:
         max_value=5,
         value=0,
         step=1,
-        key=f"paste_count_{st.session_state['reset_id']}"
+        key=(
+            f"paste_count_"
+            f"{st.session_state['reset_id']}"
+        )
     )
 
     for i in range(
@@ -642,7 +809,7 @@ with tab1:
                 f"paste_name_"
                 f"{st.session_state['reset_id']}_"
                 f"{i}"
-            ),
+            )
         )
 
         resume_text = st.text_area(
@@ -683,19 +850,20 @@ with tab1:
 
 
 # ============================================================
-# FILE UPLOAD
+# UPLOAD RESUMES
 # ============================================================
 
 with tab2:
 
     uploaded_files = st.file_uploader(
-        "Upload PDF or TXT resumes",
+        "Upload PDF or TXT resumes:",
         type=["pdf", "txt"],
         accept_multiple_files=True,
         key=(
             f"uploads_"
             f"{st.session_state['reset_id']}"
-        )
+        ),
+        help="Maximum 5 resumes."
     )
 
     if uploaded_files:
@@ -703,8 +871,10 @@ with tab2:
         if len(uploaded_files) > MAX_RESUMES:
 
             st.warning(
-                f"You selected {len(uploaded_files)} files. "
-                f"Only the first {MAX_RESUMES} will be used."
+                f"You selected "
+                f"{len(uploaded_files)} files. "
+                f"Only the first "
+                f"{MAX_RESUMES} will be used."
             )
 
         for i, uploaded_file in enumerate(
@@ -733,7 +903,8 @@ with tab2:
                 except Exception as exc:
 
                     st.error(
-                        f"Error reading {filename}: {exc}"
+                        f"Error reading "
+                        f"{filename}: {exc}"
                     )
 
             elif filename.lower().endswith(
@@ -763,9 +934,7 @@ with tab2:
                             text = page.extract_text()
 
                             if text:
-                                pages.append(
-                                    text
-                                )
+                                pages.append(text)
 
                         extracted_text = (
                             "\n".join(pages)
@@ -775,7 +944,8 @@ with tab2:
                     except Exception as exc:
 
                         st.error(
-                            f"Error reading {filename}: {exc}"
+                            f"Error reading "
+                            f"{filename}: {exc}"
                         )
 
             if extracted_text.strip():
@@ -818,15 +988,12 @@ with tab2:
             else:
 
                 st.warning(
-                    f"No text could be extracted from {filename}."
+                    f"No text could be extracted from "
+                    f"{filename}."
                 )
 
 
 if len(candidates) > MAX_RESUMES:
-
-    st.error(
-        "Maximum 5 resumes are allowed."
-    )
 
     candidates = candidates[
         :MAX_RESUMES
@@ -877,14 +1044,14 @@ else:
 
     st.info(
         "No skill weights defined. "
-        "Ranking will use AI scores."
+        "Ranking will use the AI score."
     )
 
 st.markdown("---")
 
 
 # ============================================================
-# AI ANALYSIS
+# ANALYSIS
 # ============================================================
 
 st.subheader(
@@ -897,10 +1064,16 @@ if st.button(
     use_container_width=True
 ):
 
-    if not GROQ_API_KEY:
+    if not client:
 
         st.error(
             "GROQ_API_KEY is not configured."
+        )
+
+    elif not model_name:
+
+        st.error(
+            "No Groq model is selected."
         )
 
     elif not job_description.strip():
@@ -933,7 +1106,8 @@ if st.button(
             status.write(
                 f"Analyzing "
                 f"{candidate['name']} "
-                f"({index}/{total})"
+                f"({index}/{total}) using "
+                f"`{model_name}`"
             )
 
             try:
@@ -975,7 +1149,7 @@ if st.button(
                 index / total
             )
 
-            # Tiny pause prevents unnecessarily aggressive requests.
+            # Small delay reduces burstiness.
             if index < total:
                 time.sleep(0.5)
 
@@ -989,7 +1163,8 @@ if st.button(
         if results:
 
             st.success(
-                f"Completed {len(results)} candidate analyses."
+                f"Completed analysis for "
+                f"{len(results)} candidate(s)."
             )
 
         else:
@@ -1127,14 +1302,12 @@ if results:
     highest_score = numeric_scores.max()
 
     with metric1:
-
         st.metric(
             "Candidates",
             len(df)
         )
 
     with metric2:
-
         st.metric(
             "Average Score",
             (
@@ -1145,7 +1318,6 @@ if results:
         )
 
     with metric3:
-
         st.metric(
             "Highest Score",
             (
@@ -1173,7 +1345,6 @@ if results:
             "Most Common Label",
             common_label
         )
-
 
     chart_df = df[
         ["Candidate", "AI Score"]
@@ -1320,7 +1491,7 @@ if results:
 
 
     # ========================================================
-    # DETAILED RESULTS
+    # DETAILS
     # ========================================================
 
     st.subheader(
@@ -1366,14 +1537,12 @@ if results:
             )
 
             if result.get("email"):
-
                 st.write(
                     f"Email: "
                     f"{result['email']}"
                 )
 
             if result.get("phone"):
-
                 st.write(
                     f"Phone: "
                     f"{result['phone']}"
@@ -1383,36 +1552,66 @@ if results:
                 "### Matching Skills"
             )
 
-            for skill in result[
+            if result[
                 "matching_skills"
             ]:
 
+                for skill in result[
+                    "matching_skills"
+                ]:
+
+                    st.write(
+                        f"- {skill}"
+                    )
+
+            else:
+
                 st.write(
-                    f"- {skill}"
+                    "No matching skills identified."
                 )
 
             st.markdown(
                 "### Missing Skills"
             )
 
-            for skill in result[
+            if result[
                 "missing_skills"
             ]:
 
+                for skill in result[
+                    "missing_skills"
+                ]:
+
+                    st.write(
+                        f"- {skill}"
+                    )
+
+            else:
+
                 st.write(
-                    f"- {skill}"
+                    "No significant missing skills identified."
                 )
 
             st.markdown(
                 "### Strong Points"
             )
 
-            for point in result[
+            if result[
                 "strong_points"
             ]:
 
+                for point in result[
+                    "strong_points"
+                ]:
+
+                    st.write(
+                        f"- {point}"
+                    )
+
+            else:
+
                 st.write(
-                    f"- {point}"
+                    "No additional strong points identified."
                 )
 
             st.markdown(
@@ -1420,12 +1619,14 @@ if results:
             )
 
             st.write(
-                result["summary"]
+                result[
+                    "summary"
+                ]
             )
 
 
     # ========================================================
-    # CSV EXPORT
+    # CSV
     # ========================================================
 
     st.subheader(
@@ -1446,7 +1647,7 @@ if results:
 
 
     # ========================================================
-    # EXCEL EXPORT
+    # EXCEL
     # ========================================================
 
     excel_buffer = io.BytesIO()
@@ -1576,27 +1777,35 @@ if results:
         email_lines.append(
             "Matching Skills: "
             + ", ".join(
-                result["matching_skills"]
+                result[
+                    "matching_skills"
+                ]
             )
         )
 
         email_lines.append(
             "Missing Skills: "
             + ", ".join(
-                result["missing_skills"]
+                result[
+                    "missing_skills"
+                ]
             )
         )
 
         email_lines.append(
             "Strong Points: "
             + ", ".join(
-                result["strong_points"]
+                result[
+                    "strong_points"
+                ]
             )
         )
 
         email_lines.append(
             "Summary: "
-            + result["summary"]
+            + result[
+                "summary"
+            ]
         )
 
         email_lines.append("")
@@ -1623,5 +1832,5 @@ st.markdown("---")
 
 st.caption(
     "Powered by Groq. "
-    "For current model and rate-limit details, check your Groq console."
+    "The model list is detected automatically from your Groq API key."
 )
